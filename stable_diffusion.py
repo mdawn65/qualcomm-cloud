@@ -22,7 +22,7 @@ pipeline_quant_config = PipelineQuantizationConfig(
 # --- Load pipeline with quantization ---
 start_load_time = time.perf_counter()
 pipe = DiffusionPipeline.from_pretrained(
-    "stabilityai/stable-diffusion-2-1",
+    "RedbeardNZ/stable-diffusion-2-1-base",
     dtype=torch.float16,  # fp16 activations
     quantization_config=pipeline_quant_config,  # int8 weights
     safety_checker=None
@@ -30,7 +30,7 @@ pipe = DiffusionPipeline.from_pretrained(
 
 start_generation_time = time.perf_counter()
 prompt = "a boy playing tennis"
-image = pipe(prompt, num_inference_steps=50).images[0]
+image = pipe(prompt, num_inference_steps=20).images[0]
 output_file = "output.png"
 
 start_image_save_time = time.perf_counter()
