@@ -1,13 +1,29 @@
 import os
 import time
+
 import torch
+import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from diffusers import DiffusionPipeline
 from diffusers.quantizers import PipelineQuantizationConfig
 from transformers import BitsAndBytesConfig
 
 app = FastAPI()
+
+# Allow your separate frontend (e.g. http://localhost:3000) to call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # TODO: restrict to your frontend origin in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve generated images from the project root (where output.png is saved)
+app.mount("/images", StaticFiles(directory="."), name="images")
 
 device = "cuda"
 
@@ -68,6 +84,13 @@ def generate(req: GenerateRequest):
     return {
         "status": "done",
         "output_file": output_file,
+        "image_url": f"/images/{output_file}",
         "prompt": req.prompt,
-        "inference_time": total_time
+        "inference_time": total_time,
     }
+
+
+if __name__ == "__main__":
+    # Run with: python server.py
+    # Or directly: uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
