@@ -81,63 +81,67 @@ def calculate_guidance_scale_values(min_scale: float, max_scale: float, num_samp
 
 @app.post("/generate")
 def generate(req: GenerateRequest):
-    total_start = time.perf_counter()
-    generation_times: list[float] = []
-    images_out: list[dict] = []
+    def event_stream():
+        total_start = time.perf_counter()
+        generation_times: list[float] = []
 
-    # Prepare seeds list
-    seeds: list[int] = []
-    if req.seeds:
-        seeds.extend(req.seeds[: req.num_seeds])
+        # Prepare seeds list
+        seeds: list[int] = []
+        if req.seeds:
+            seeds.extend(req.seeds[: req.num_seeds])
 
-    while len(seeds) < req.num_seeds:
-        seeds.append(int(torch.randint(0, 2**31 - 1, (1,)).item()))
+        while len(seeds) < req.num_seeds:
+            seeds.append(int(torch.randint(0, 2**31 - 1, (1,)).item()))
 
-    guidance_scales = calculate_guidance_scale_values(
-        req.guidance_scale_min,
-        req.guidance_scale_max,
-        req.num_guidance_samples,
-    )
+        guidance_scales = calculate_guidance_scale_values(
+            req.guidance_scale_min,
+            req.guidance_scale_max,
+            req.num_guidance_samples,
+        )
 
-    for seed_index, seed in enumerate(seeds):
-        for guidance_index, guidance_scale in enumerate(guidance_scales):
-            generator = torch.Generator(device=device)
-            generator.manual_seed(seed)
+        for seed_index, seed in enumerate(seeds):
+            for guidance_index, guidance_scale in enumerate(guidance_scales):
+                generator = torch.Generator(device=device)
+                generator.manual_seed(seed)
 
-            start = time.perf_counter()
-            image = pipe(
-                req.prompt,
-                num_inference_steps=req.num_steps,
-                guidance_scale=guidance_scale,
-                width=req.width,
-                height=req.height,
-                generator=generator,
-            ).images[0]
-            gen_time = time.perf_counter() - start
-            generation_times.append(gen_time)
+                start = time.perf_counter()
+                image = pipe(
+                    req.prompt,
+                    num_inference_steps=req.num_steps,
+                    guidance_scale=guidance_scale,
+                    width=req.width,
+                    height=req.height,
+                    generator=generator,
+                ).images[0]
+                gen_time = time.perf_counter() - start
+                generation_times.append(gen_time)
 
-            img_base64 = image_to_base64(image)
+                img_base64 = image_to_base64(image)
 
-            images_out.append(
-                {
+                image_event = {
+                    "type": "image",
                     "seed_index": seed_index,
                     "guidance_index": guidance_index,
                     "seed": seed,
                     "guidance_scale": guidance_scale,
                     "imageBase64": img_base64,
                     "generationTime": round(gen_time, 2),
+                    "clipScore": None,
+                    "clipComputationTime": None,
                 }
-            )
+                yield "data: " + json.dumps(image_event) + "\n\n"
 
-    total_time = time.perf_counter() - total_start
-    avg_time = sum(generation_times) / len(generation_times) if generation_times else 0.0
+        total_time = time.perf_counter() - total_start
+        avg_time = sum(generation_times) / len(generation_times) if generation_times else 0.0
 
-    return {
-        "status": "done",
-        "images": images_out,
-        "totalLatency": round(total_time, 2),
-        "averageLatency": round(avg_time, 2),
-    }
+        complete_event = {
+            "type": "complete",
+            "totalLatency": round(total_time, 2),
+            "averageLatency": round(avg_time, 2),
+        }
+        yield "data: " + json.dumps(complete_event) + "\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     uvicorn.run("cloud_server:app", host="0.0.0.0", port=8000, reload=True)
