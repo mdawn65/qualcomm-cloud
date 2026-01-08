@@ -93,4 +93,4 @@ def generate(req: GenerateRequest):
 if __name__ == "__main__":
     # Run with: python server.py
     # Or directly: uvicorn server:app --host 0.0.0.0 --port 8000 --reload
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("cloud_server:app", host="0.0.0.0", port=8000, reload=True)
