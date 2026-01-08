@@ -90,6 +90,7 @@ def compute_clip_score_fn(pil_image: Image.Image, text: str) -> tuple[float, flo
 
 class GenerateRequest(BaseModel):
     prompt: str
+    negative_prompt: str | None = None
     num_steps: int = 20
     num_seeds: int = 1
     num_guidance_samples: int = 1
@@ -141,6 +142,7 @@ def generate(req: GenerateRequest):
                 start = time.perf_counter()
                 image = pipe(
                     req.prompt,
+                    negative_prompt=req.negative_prompt,
                     num_inference_steps=req.num_steps,
                     guidance_scale=guidance_scale,
                     width=req.width,
