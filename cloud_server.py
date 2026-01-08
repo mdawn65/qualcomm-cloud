@@ -57,63 +57,87 @@ print(f"Model loaded in {load_end - load_start:.2f} seconds")
 
 class GenerateRequest(BaseModel):
     prompt: str
-    num_inference_steps: int = 20
-    guidance_scale: float = 7.5
+    num_steps: int = 20
+    num_seeds: int = 1
+    num_guidance_samples: int = 1
+    guidance_scale_min: float = 7.5
+    guidance_scale_max: float = 7.5
+    seeds: list[int] | None = None
     width: int = 512
     height: int = 512
-    seed: int | None = None
+
+
+def calculate_guidance_scale_values(min_scale: float, max_scale: float, num_samples: int) -> list[float]:
+    if num_samples <= 1:
+        return [round(min_scale * 2) / 2]
+
+    values: list[float] = []
+    step = (max_scale - min_scale) / (num_samples - 1)
+    for i in range(num_samples):
+        value = min_scale + step * i
+        values.append(round(value * 2) / 2)
+    return values
+
 
 @app.post("/generate")
 def generate(req: GenerateRequest):
-    def event_stream():
-        total_start = time.perf_counter()
-        generation_times: list[float] = []
+    total_start = time.perf_counter()
+    generation_times: list[float] = []
+    images_out: list[dict] = []
 
-        seed_index = 0
-        guidance_index = 0
+    # Prepare seeds list
+    seeds: list[int] = []
+    if req.seeds:
+        seeds.extend(req.seeds[: req.num_seeds])
 
-        generator = torch.Generator(device=device)
-        if req.seed is not None:
-            generator.manual_seed(req.seed)
+    while len(seeds) < req.num_seeds:
+        seeds.append(int(torch.randint(0, 2**31 - 1, (1,)).item()))
 
-        start = time.perf_counter()
-        image = pipe(
-            req.prompt,
-            num_inference_steps=req.num_inference_steps,
-            guidance_scale=req.guidance_scale,
-            width=req.width,
-            height=req.height,
-            generator=generator,
-        ).images[0]
-        gen_time = time.perf_counter() - start
-        generation_times.append(gen_time)
+    guidance_scales = calculate_guidance_scale_values(
+        req.guidance_scale_min,
+        req.guidance_scale_max,
+        req.num_guidance_samples,
+    )
 
-        img_base64 = image_to_base64(image)
+    for seed_index, seed in enumerate(seeds):
+        for guidance_index, guidance_scale in enumerate(guidance_scales):
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed)
 
-        image_event = {
-            "type": "image",
-            "seed_index": seed_index,
-            "guidance_index": guidance_index,
-            "seed": req.seed,
-            "guidance_scale": req.guidance_scale,
-            "imageBase64": img_base64,
-            "generationTime": round(gen_time, 2),
-            "clipScore": None,
-            "clipComputationTime": None,
-        }
-        yield "data: " + json.dumps(image_event) + "\n\n"
+            start = time.perf_counter()
+            image = pipe(
+                req.prompt,
+                num_inference_steps=req.num_steps,
+                guidance_scale=guidance_scale,
+                width=req.width,
+                height=req.height,
+                generator=generator,
+            ).images[0]
+            gen_time = time.perf_counter() - start
+            generation_times.append(gen_time)
 
-        total_time = time.perf_counter() - total_start
-        avg_time = sum(generation_times) / len(generation_times) if generation_times else 0.0
+            img_base64 = image_to_base64(image)
 
-        complete_event = {
-            "type": "complete",
-            "totalLatency": round(total_time, 2),
-            "averageLatency": round(avg_time, 2),
-        }
-        yield "data: " + json.dumps(complete_event) + "\n\n"
+            images_out.append(
+                {
+                    "seed_index": seed_index,
+                    "guidance_index": guidance_index,
+                    "seed": seed,
+                    "guidance_scale": guidance_scale,
+                    "imageBase64": img_base64,
+                    "generationTime": round(gen_time, 2),
+                }
+            )
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    total_time = time.perf_counter() - total_start
+    avg_time = sum(generation_times) / len(generation_times) if generation_times else 0.0
+
+    return {
+        "status": "done",
+        "images": images_out,
+        "totalLatency": round(total_time, 2),
+        "averageLatency": round(avg_time, 2),
+    }
 
 if __name__ == "__main__":
     uvicorn.run("cloud_server:app", host="0.0.0.0", port=8000, reload=True)
