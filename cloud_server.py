@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from diffusers import DiffusionPipeline
 from diffusers.quantizers import PipelineQuantizationConfig
-from transformers import BitsAndBytesConfig
+from transformers import BitsAndBytesConfig, CLIPProcessor, CLIPModel
 from PIL import Image
 
 app = FastAPI()
@@ -29,6 +29,9 @@ app.add_middleware(
 app.mount("/images", StaticFiles(directory="."), name="images")
 
 device = "cuda"
+
+clip_model: CLIPModel | None = None
+clip_processor: CLIPProcessor | None = None
 
 
 def image_to_base64(pil_image: Image.Image) -> str:
@@ -55,6 +58,36 @@ pipe = DiffusionPipeline.from_pretrained(
 load_end = time.perf_counter()
 print(f"Model loaded in {load_end - load_start:.2f} seconds")
 
+print("Loading CLIP model for scoring...")
+clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+print("CLIP model loaded successfully!")
+
+
+def compute_clip_score_fn(pil_image: Image.Image, text: str) -> tuple[float, float]:
+    start_time = time.time()
+
+    inputs = clip_processor(
+        text=[text],
+        images=pil_image,
+        return_tensors="pt",
+        padding=True,
+    )
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        image_features = clip_model.get_image_features(pixel_values=inputs["pixel_values"])
+        text_features = clip_model.get_text_features(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+        )
+
+    image_features /= image_features.norm(p=2, dim=-1, keepdim=True)
+    text_features /= text_features.norm(p=2, dim=-1, keepdim=True)
+
+    clip_score = (image_features @ text_features.T).item()
+    return clip_score, time.time() - start_time
+
 class GenerateRequest(BaseModel):
     prompt: str
     num_steps: int = 20
@@ -65,6 +98,7 @@ class GenerateRequest(BaseModel):
     seeds: list[int] | None = None
     width: int = 512
     height: int = 512
+    compute_clip_score: bool = False
 
 
 def calculate_guidance_scale_values(min_scale: float, max_scale: float, num_samples: int) -> list[float]:
@@ -116,6 +150,11 @@ def generate(req: GenerateRequest):
                 gen_time = time.perf_counter() - start
                 generation_times.append(gen_time)
 
+                clip_score = None
+                clip_time = None
+                if req.compute_clip_score:
+                    clip_score, clip_time = compute_clip_score_fn(image, req.prompt)
+
                 img_base64 = image_to_base64(image)
 
                 image_event = {
@@ -126,8 +165,8 @@ def generate(req: GenerateRequest):
                     "guidance_scale": guidance_scale,
                     "imageBase64": img_base64,
                     "generationTime": round(gen_time, 2),
-                    "clipScore": None,
-                    "clipComputationTime": None,
+                    "clipScore": round(clip_score, 4) if clip_score is not None else None,
+                    "clipComputationTime": round(clip_time, 2) if clip_time is not None else None,
                 }
                 yield "data: " + json.dumps(image_event) + "\n\n"
 
