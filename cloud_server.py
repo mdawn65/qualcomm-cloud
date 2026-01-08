@@ -1,6 +1,6 @@
 import os
 import time
-
+import uuid
 import torch
 import uvicorn
 from fastapi import FastAPI
@@ -13,37 +13,25 @@ from transformers import BitsAndBytesConfig
 
 app = FastAPI()
 
-# Allow your separate frontend (e.g. http://localhost:3000) to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: restrict to your frontend origin in production
+    allow_origins=["*"],  # restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Serve generated images from the project root (where output.png is saved)
 app.mount("/images", StaticFiles(directory="."), name="images")
 
 device = "cuda"
 
-# ------------------------------
-# Quantization configs (your same settings)
-# ------------------------------
-bnb_config = BitsAndBytesConfig(
-    load_in_8bit=True
-)
-
+bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 pipeline_quant_config = PipelineQuantizationConfig(
     quant_backend="bitsandbytes_8bit",
     quant_kwargs={"load_in_8bit": True}
 )
 
-# ------------------------------
-# Load model at server startup
-# ------------------------------
 print("Loading model...")
-
 load_start = time.perf_counter()
 
 pipe = DiffusionPipeline.from_pretrained(
@@ -56,27 +44,32 @@ pipe = DiffusionPipeline.from_pretrained(
 load_end = time.perf_counter()
 print(f"Model loaded in {load_end - load_start:.2f} seconds")
 
-# ------------------------------
-# Request schema
-# ------------------------------
 class GenerateRequest(BaseModel):
     prompt: str
     num_inference_steps: int = 20
+    guidance_scale: float = 7.5
+    width: int = 512
+    height: int = 512
+    seed: int | None = None
 
-
-# ------------------------------
-# Generate Endpoint
-# ------------------------------
 @app.post("/generate")
 def generate(req: GenerateRequest):
     start = time.perf_counter()
 
+    generator = torch.Generator(device=device)
+    if req.seed is not None:
+        generator.manual_seed(req.seed)
+
     image = pipe(
         req.prompt,
-        num_inference_steps=req.num_inference_steps
+        num_inference_steps=req.num_inference_steps,
+        guidance_scale=req.guidance_scale,
+        width=req.width,
+        height=req.height,
+        generator=generator
     ).images[0]
 
-    output_file = "output.png"
+    output_file = f"output_{uuid.uuid4().hex}.png"
     image.save(output_file)
 
     total_time = time.perf_counter() - start
@@ -89,8 +82,5 @@ def generate(req: GenerateRequest):
         "inference_time": total_time,
     }
 
-
 if __name__ == "__main__":
-    # Run with: python server.py
-    # Or directly: uvicorn server:app --host 0.0.0.0 --port 8000 --reload
     uvicorn.run("cloud_server:app", host="0.0.0.0", port=8000, reload=True)
